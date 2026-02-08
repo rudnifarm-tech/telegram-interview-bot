@@ -215,6 +215,13 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             row_values = [payload.get(h, "") for h in header]
             ws.append_row(row_values, value_input_option="USER_ENTERED")
 
+await query.answer("✅ Відправлено")  # щоб Telegram не крутив
+
+# 1) прибираємо кнопки з review (не обов'язково, але зручно)
+await query.edit_message_reply_markup(reply_markup=None)
+
+# 2) НАДсилаємо окреме повідомлення з “загальною інформацією”
+
             await query.edit_message_text(
                 "Дякуємо, що відгукнулись на нашу вакансію. "
                 "Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!\n\n"
