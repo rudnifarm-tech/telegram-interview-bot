@@ -52,8 +52,19 @@ QUESTIONS_TEXT = [
 (S_TEXT_Q, S_REVIEW, S_ADD_NOTE) = range(3)
 
 # ------------- Google Sheets -------------
+import base64
+import json
+import os
+import gspread
+from google.oauth2.service_account import Credentials
+
 def gs_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    b64 = os.environ.get("GOOGLE_CREDS_B64")
+    if not b64:
+        raise RuntimeError("Не задано GOOGLE_CREDS_B64")
+    creds_dict = json.loads(base64.b64decode(b64).decode("utf-8"))
     creds = Credentials.from_service_account_file(GOOGLE_CREDS_FILE, scopes=scopes)
     return gspread.authorize(creds)
 
