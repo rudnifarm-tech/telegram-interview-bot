@@ -107,7 +107,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Команди:\n"
         "/interview — почати\n"
         "/cancel — скасувати\n"
-        "/chatid — показати chat_id (корисно в групі)"
     )
 
 
