@@ -2,9 +2,6 @@ import os
 import re
 from datetime import datetime, timezone
 
-import gspread
-from google.oauth2.service_account import Credentials
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -18,10 +15,7 @@ from telegram.ext import (
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-SHEET_ID = os.environ.get("SHEET_ID")  # Google Sheet ID (між /d/ і /edit)
-WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "Interviews")
-GOOGLE_CREDS_FILE = os.environ.get("GOOGLE_CREDS_FILE", "service_account.json")
-GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")  # -100xxxxxxxxxx
 
 # -------------- QUESTIONS ---------------
 QUESTIONS_TEXT = [
@@ -52,33 +46,9 @@ QUESTIONS_TEXT = [
 # ---------------- STATES ----------------
 (S_TEXT_Q, S_REVIEW, S_ADD_NOTE) = range(3)
 
-# ------------- Google Sheets -------------
-import base64
-import json
-import os
-import gspread
-from google.oauth2.service_account import Credentials
-
-def gs_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-
-    b64 = os.environ.get("GOOGLE_CREDS_B64")
-    if not b64:
-        raise RuntimeError("Не задано GOOGLE_CREDS_B64")
-    creds_dict = json.loads(base64.b64decode(b64).decode("utf-8"))
-    creds = Credentials.from_service_account_file(GOOGLE_CREDS_FILE, scopes=scopes)
-    return gspread.authorize(creds)
-
-
-def open_ws():
-    gc = gs_client()
-    sh = gc.open_by_key(SHEET_ID)
-    return sh.worksheet(WORKSHEET_NAME)
-
 
 # ------------- Validation -------------
 def is_valid_phone(phone: str) -> bool:
-    # 380XXXXXXXXX (12 цифр, починається з 380)
     return bool(re.match(r"^380\d{9}$", phone.strip()))
 
 
@@ -96,22 +66,42 @@ def review_keyboard():
 def build_review_text(answers: dict, note: str) -> str:
     lines = ["*Перевірте відповіді кандидата:*\n"]
     for key, question in QUESTIONS_TEXT:
-        ans = (answers.get(key) or "").strip()
-        if not ans:
-            ans = "—"
+        ans = (answers.get(key) or "").strip() or "—"
         lines.append(f"*{question}*\n{ans}\n")
     lines.append("*Примітка:*\n" + (note.strip() if note.strip() else "—"))
     return "\n".join(lines)
 
 
+def build_group_text(answers: dict, note: str, user) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    text = f"📝 *Нова анкета кандидата*\n🕒 {ts}\n\n"
+
+    for key, q in QUESTIONS_TEXT:
+        text += f"*{q}*\n{(answers.get(key) or '—').strip()}\n\n"
+
+    if note.strip():
+        text += f"🗒 *Примітка менеджера:*\n{note.strip()}\n\n"
+
+    if user.username:
+        text += f"👤 Telegram: @{user.username}\n"
+    text += f"🆔 Telegram ID: {user.id}\n"
+    return text
+
+
 # ------------- Handlers -------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привіт! Я аcистент HR менеджера Carbook. Це перший етап співбесіди.\n\n"
+        "Привіт! Я асистент HR менеджера Carbook. Це перший етап співбесіди.\n\n"
         "Команди:\n"
         "/interview — почати\n"
-        "/cancel — скасувати"
+        "/cancel — скасувати\n"
+        "/chatid — показати chat_id (корисно в групі)"
     )
+
+
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Пиши /chatid у групі, щоб отримати GROUP_CHAT_ID
+    await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,35 +124,37 @@ async def interview(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q_idx = context.user_data.get("q_idx", 0)
     key, _prompt = QUESTIONS_TEXT[q_idx]
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
-    # Валідація телефону
-    if key == "phone":
-        if not is_valid_phone(text):
-            await update.message.reply_text(
-                "❌ Невірний формат телефону.\n"
-                "Введіть у форматі: 380XXXXXXXXX (12 цифр, без пробілів)"
-            )
-            return S_TEXT_Q
+    if key == "phone" and not is_valid_phone(text):
+        await update.message.reply_text(
+            "❌ Невірний формат телефону.\n"
+            "Введіть у форматі: 380XXXXXXXXX (12 цифр, без пробілів)"
+        )
+        return S_TEXT_Q
 
     context.user_data["answers"][key] = text
-
     q_idx += 1
     context.user_data["q_idx"] = q_idx
 
-    # Є ще питання
     if q_idx < len(QUESTIONS_TEXT):
         _next_key, next_prompt = QUESTIONS_TEXT[q_idx]
         await update.message.reply_text(next_prompt)
         return S_TEXT_Q
 
-    # Питання закінчились -> показуємо review
-    review_text = build_review_text(
-        context.user_data["answers"], context.user_data.get("note", "")
-    )
-    await update.message.reply_text(
-        review_text, parse_mode="Markdown", reply_markup=review_keyboard()
-    )
+    review_text = build_review_text(context.user_data["answers"], context.user_data.get("note", ""))
+    await update.message.reply_text(review_text, parse_mode="Markdown", reply_markup=review_keyboard())
+    return S_REVIEW
+
+
+async def on_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    note = (update.message.text or "").strip()
+    if note == "-":
+        note = ""
+    context.user_data["note"] = note
+
+    review_text = build_review_text(context.user_data["answers"], context.user_data.get("note", ""))
+    await update.message.reply_text(review_text, parse_mode="Markdown", reply_markup=review_keyboard())
     return S_REVIEW
 
 
@@ -185,100 +177,45 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return S_ADD_NOTE
 
     if action == "review:send":
-        # Записуємо у Google Sheet
-        answers = context.user_data.get("answers", {})
-        note = context.user_data.get("note", "")
-
-        payload = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-            "candidate": answers.get("candidate", ""),
-            "phone": answers.get("phone", ""),
-            "city": answers.get("city", ""),
-            "age": answers.get("age", ""),
-            "education": answers.get("education", ""),
-            "equipment": answers.get("equipment", ""),
-            "sales_experience": answers.get("sales_experience", ""),
-            "auto_business": answers.get("auto_business", ""),
-            "crm": answers.get("crm", ""),
-            "salary_from": answers.get("salary_from", ""),
-            "why_software": answers.get("why_software", ""),
-            "case1": answers.get("case1", ""),
-            "case2": answers.get("case2", ""),
-            "case3": answers.get("case3", ""),
-            "needs_qs": answers.get("needs_qs", ""),
-            "why_you": answers.get("why_you", ""),
-            "note": note,
-        }
-
         try:
-    if not GROUP_CHAT_ID:
-        raise RuntimeError("Не задано GROUP_CHAT_ID")
+            if not GROUP_CHAT_ID:
+                raise RuntimeError("Не задано GROUP_CHAT_ID")
 
-    answers = context.user_data["answers"]
-    note = context.user_data.get("note", "")
+            answers = context.user_data.get("answers", {})
+            note = context.user_data.get("note", "")
 
-    text = "📝 Нова анкета кандидата\n\n"
-    for key, q in QUESTIONS_TEXT:
-        text += f"{q}\n{answers.get(key,'')}\n\n"
-    if note:
-        text += f"🗒 Примітка:\n{note}\n\n"
+            group_text = build_group_text(answers, note, query.from_user)
 
-    user = query.from_user
-    text += f"👤 Telegram: @{user.username}" if user.username else f"👤 Telegram ID: {user.id}"
-
-    await context.bot.send_message(chat_id=int(GROUP_CHAT_ID), text=text)
-
-    # підтвердження користувачу (краще окремим повідомленням)
-    await query.answer("✅ Відправлено")
-    await query.edit_message_reply_markup(reply_markup=None)
-    await query.message.reply_text(
-        "Дякуємо! Анкета відправлена. Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!"
-    )
-
-except Exception as e:
-    await query.message.reply_text(f"❌ Помилка відправки в групу:\n{e}")
-
-await query.answer("✅ Відправлено")  # щоб Telegram не крутив
-
-# 1) прибираємо кнопки з review (не обов'язково, але зручно)
-await query.edit_message_reply_markup(reply_markup=None)
-
-# 2) НАДсилаємо окреме повідомлення з “загальною інформацією”
-
-            await query.edit_message_text(
-                "Дякуємо, що відгукнулись на нашу вакансію. "
-                "Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!\n\n"
-                "Для додаткової інформації можете ознайомитись з нашою програмою Carbook на сайті:\n"
-                "https://carbook.mobi/"
+            # Надсилаємо в групу
+            await context.bot.send_message(
+                chat_id=int(GROUP_CHAT_ID),
+                text=group_text,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
+
+            # Прибираємо кнопки з review і пишемо кандидату
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                "✅ Дякуємо! Анкета відправлена. Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!\n\n"
+                "Для додаткової інформації про Carbook:\n"
+                "https://carbook.mobi/",
+                disable_web_page_preview=True,
+            )
+
+            context.user_data.clear()
+            return ConversationHandler.END
+
         except Exception as e:
-            await query.edit_message_text(
-                f"❌ Помилка запису в Google Sheets:\n`{e}`", parse_mode="Markdown"
-            )
+            await query.message.reply_text(f"❌ Помилка відправки в групу:\n{e}")
+            return S_REVIEW
 
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    return S_REVIEW
-
-
-async def on_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    note = update.message.text.strip()
-    if note == "-":
-        note = ""
-    context.user_data["note"] = note
-
-    # Показуємо review з приміткою
-    review_text = build_review_text(context.user_data["answers"], context.user_data.get("note", ""))
-    await update.message.reply_text(review_text, parse_mode="Markdown", reply_markup=review_keyboard())
     return S_REVIEW
 
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задано BOT_TOKEN")
-    if not SHEET_ID:
-        raise RuntimeError("Не задано SHEET_ID")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -286,11 +223,7 @@ def main():
         entry_points=[CommandHandler("interview", interview)],
         states={
             S_TEXT_Q: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_text)],
-            S_REVIEW: [
-                CallbackQueryHandler(
-                    on_review_callback, pattern=r"^review:(add_note|send|cancel)$"
-                )
-            ],
+            S_REVIEW: [CallbackQueryHandler(on_review_callback, pattern=r"^review:(add_note|send|cancel)$")],
             S_ADD_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_note_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -298,8 +231,9 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv)
+    app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(conv)
 
     app.run_polling()
 
