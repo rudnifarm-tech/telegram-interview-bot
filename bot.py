@@ -21,6 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SHEET_ID = os.environ.get("SHEET_ID")  # Google Sheet ID (між /d/ і /edit)
 WORKSHEET_NAME = os.environ.get("WORKSHEET_NAME", "Interviews")
 GOOGLE_CREDS_FILE = os.environ.get("GOOGLE_CREDS_FILE", "service_account.json")
+GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
 
 # -------------- QUESTIONS ---------------
 QUESTIONS_TEXT = [
@@ -210,10 +211,32 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         }
 
         try:
-            ws = open_ws()
-            header = ws.row_values(1)
-            row_values = [payload.get(h, "") for h in header]
-            ws.append_row(row_values, value_input_option="USER_ENTERED")
+    if not GROUP_CHAT_ID:
+        raise RuntimeError("Не задано GROUP_CHAT_ID")
+
+    answers = context.user_data["answers"]
+    note = context.user_data.get("note", "")
+
+    text = "📝 Нова анкета кандидата\n\n"
+    for key, q in QUESTIONS_TEXT:
+        text += f"{q}\n{answers.get(key,'')}\n\n"
+    if note:
+        text += f"🗒 Примітка:\n{note}\n\n"
+
+    user = query.from_user
+    text += f"👤 Telegram: @{user.username}" if user.username else f"👤 Telegram ID: {user.id}"
+
+    await context.bot.send_message(chat_id=int(GROUP_CHAT_ID), text=text)
+
+    # підтвердження користувачу (краще окремим повідомленням)
+    await query.answer("✅ Відправлено")
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Дякуємо! Анкета відправлена. Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!"
+    )
+
+except Exception as e:
+    await query.message.reply_text(f"❌ Помилка відправки в групу:\n{e}")
 
 await query.answer("✅ Відправлено")  # щоб Telegram не крутив
 
