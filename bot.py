@@ -1,5 +1,8 @@
+# bot.py
 import os
 import re
+import html
+import logging
 from datetime import datetime, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -12,6 +15,13 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# ---------------- LOGGING ----------------
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -63,27 +73,29 @@ def review_keyboard():
     )
 
 
-def build_review_text(answers: dict, note: str) -> str:
-    lines = ["*Перевірте відповіді кандидата:*\n"]
+def build_review_text_html(answers: dict, note: str) -> str:
+    lines = ["<b>Перевірте відповіді кандидата:</b>\n"]
     for key, question in QUESTIONS_TEXT:
         ans = (answers.get(key) or "").strip() or "—"
-        lines.append(f"*{question}*\n{ans}\n")
-    lines.append("*Примітка:*\n" + (note.strip() if note.strip() else "—"))
+        lines.append(f"<b>{html.escape(question)}</b>\n{html.escape(ans)}\n")
+    lines.append("<b>Примітка:</b>\n" + (html.escape(note.strip()) if note.strip() else "—"))
     return "\n".join(lines)
 
 
-def build_group_text(answers: dict, note: str, user) -> str:
+def build_group_text_html(answers: dict, note: str, user) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    text = f"📝 *Нова анкета кандидата*\n🕒 {ts}\n\n"
+    text = f"📝 <b>Нова анкета кандидата</b>\n🕒 {html.escape(ts)}\n\n"
 
     for key, q in QUESTIONS_TEXT:
-        text += f"*{q}*\n{(answers.get(key) or '—').strip()}\n\n"
+        q_esc = html.escape(q)
+        a_esc = html.escape(((answers.get(key) or "—").strip()))
+        text += f"<b>{q_esc}</b>\n{a_esc}\n\n"
 
     if note.strip():
-        text += f"🗒 *Примітка менеджера:*\n{note.strip()}\n\n"
+        text += f"🗒 <b>Примітка менеджера:</b>\n{html.escape(note.strip())}\n\n"
 
     if user.username:
-        text += f"👤 Telegram: @{user.username}\n"
+        text += f"👤 Telegram: @{html.escape(user.username)}\n"
     text += f"🆔 Telegram ID: {user.id}\n"
     return text
 
@@ -100,7 +112,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Пиши /chatid у групі, щоб отримати GROUP_CHAT_ID
     await update.message.reply_text(f"chat_id: {update.effective_chat.id}")
 
 
@@ -142,8 +153,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(next_prompt)
         return S_TEXT_Q
 
-    review_text = build_review_text(context.user_data["answers"], context.user_data.get("note", ""))
-    await update.message.reply_text(review_text, parse_mode="Markdown", reply_markup=review_keyboard())
+    review_text = build_review_text_html(context.user_data["answers"], context.user_data.get("note", ""))
+    await update.message.reply_text(review_text, parse_mode="HTML", reply_markup=review_keyboard())
     return S_REVIEW
 
 
@@ -153,8 +164,8 @@ async def on_note_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note = ""
     context.user_data["note"] = note
 
-    review_text = build_review_text(context.user_data["answers"], context.user_data.get("note", ""))
-    await update.message.reply_text(review_text, parse_mode="Markdown", reply_markup=review_keyboard())
+    review_text = build_review_text_html(context.user_data["answers"], context.user_data.get("note", ""))
+    await update.message.reply_text(review_text, parse_mode="HTML", reply_markup=review_keyboard())
     return S_REVIEW
 
 
@@ -171,8 +182,8 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "review:add_note":
         await query.edit_message_text(
-            "Напишіть примітку (коментар менеджера). Якщо не потрібно — напишіть просто `-`.",
-            parse_mode="Markdown",
+            "Напишіть примітку (коментар менеджера). Якщо не потрібно — напишіть просто <code>-</code>.",
+            parse_mode="HTML",
         )
         return S_ADD_NOTE
 
@@ -184,17 +195,15 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             answers = context.user_data.get("answers", {})
             note = context.user_data.get("note", "")
 
-            group_text = build_group_text(answers, note, query.from_user)
+            group_text = build_group_text_html(answers, note, query.from_user)
 
-            # Надсилаємо в групу
             await context.bot.send_message(
                 chat_id=int(GROUP_CHAT_ID),
                 text=group_text,
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 disable_web_page_preview=True,
             )
 
-            # Прибираємо кнопки з review і пишемо кандидату
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_text(
                 "✅ Дякуємо! Анкета відправлена. Наш HR відділ опрацює відповіді і звʼяжеться з Вами. Гарного дня!\n\n"
@@ -207,6 +216,7 @@ async def on_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return ConversationHandler.END
 
         except Exception as e:
+            logger.exception("Send to group failed")
             await query.message.reply_text(f"❌ Помилка відправки в групу:\n{e}")
             return S_REVIEW
 
@@ -217,13 +227,25 @@ def main():
     if not BOT_TOKEN:
         raise RuntimeError("Не задано BOT_TOKEN")
 
+    # Легка перевірка формату GROUP_CHAT_ID (не блокує роботу, але підкаже)
+    if GROUP_CHAT_ID:
+        try:
+            int(GROUP_CHAT_ID)
+        except ValueError:
+            raise RuntimeError("GROUP_CHAT_ID має бути числом, наприклад: -1001234567890")
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("interview", interview)],
         states={
             S_TEXT_Q: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_text)],
-            S_REVIEW: [CallbackQueryHandler(on_review_callback, pattern=r"^review:(add_note|send|cancel)$")],
+            S_REVIEW: [
+                CallbackQueryHandler(
+                    on_review_callback,
+                    pattern=r"^review:(add_note|send|cancel)$",
+                )
+            ],
             S_ADD_NOTE: [MessageHandler(filters.TEXT & ~filters.COMMAND, on_note_text)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -235,6 +257,7 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(conv)
 
+    logger.info("Bot started (polling).")
     app.run_polling()
 
 
